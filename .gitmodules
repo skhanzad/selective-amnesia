@@ -1,3 +1,6 @@
 [submodule "ext/LongMemEval"]
 	path = ext/LongMemEval
 	url = https://github.com/xiaowu0162/LongMemEval.git
+[submodule "ext/locomo"]
+	path = ext/locomo
+	url = https://github.com/snap-research/locomo.git
