@@ -1772,7 +1772,9 @@ dependencies = [
     { name = "networkx" },
     { name = "pydantic" },
     { name = "python-dotenv" },
+    { name = "pyvis" },
     { name = "pyyaml" },
+    { name = "streamlit" },
 ]
 
 [package.optional-dependencies]
@@ -1796,8 +1798,10 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "pyvis", specifier = ">=0.3.2" },
     { name = "pyvis", marker = "extra == 'ui'", specifier = ">=0.3" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "streamlit", specifier = ">=1.55.0" },
     { name = "streamlit", marker = "extra == 'ui'", specifier = ">=1.40" },
 ]
 provides-extras = ["dev", "ui"]

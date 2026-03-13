@@ -183,7 +183,9 @@ def extract_memories(
 
     # Create MemoryNode objects and add to graph
     new_nodes: list[dict[str, Any]] = []
+    created_nodes: list[MemoryNode] = []
     default_importance = config.get("memory", {}).get("default_importance", 0.5)
+    existing_nodes = graph_store.get_all_nodes()
 
     for mem in memories_data:
         if not isinstance(mem, dict) or "content" not in mem:
@@ -208,8 +210,54 @@ def extract_memories(
         )
         graph_store.add_node(node)
         new_nodes.append(node.model_dump(mode="json"))
+        created_nodes.append(node)
 
-    logger.info("Extracted %d new memories at turn %d", len(new_nodes), current_turn)
+    # Create edges from the LLM's edge specifications
+    from src.memory.schemas import EdgeType, MemoryEdge
+
+    edge_count = 0
+    for i, mem in enumerate(memories_data):
+        if not isinstance(mem, dict) or i >= len(created_nodes):
+            continue
+        source_node = created_nodes[i]
+
+        for edge_spec in mem.get("edges", []):
+            if not isinstance(edge_spec, dict):
+                continue
+
+            target_index = edge_spec.get("target_index")
+            edge_type_str = edge_spec.get("edge_type", "related_to")
+
+            try:
+                edge_type = EdgeType(edge_type_str)
+            except ValueError:
+                edge_type = EdgeType.related_to
+
+            # target_index can refer to another new node or an existing node
+            target_node = None
+            if isinstance(target_index, int):
+                if 0 <= target_index < len(created_nodes):
+                    target_node = created_nodes[target_index]
+                elif 0 <= target_index < len(existing_nodes):
+                    # LLM referenced an existing memory by index
+                    target_node = existing_nodes[target_index]
+
+            if target_node and target_node.id != source_node.id:
+                try:
+                    edge = MemoryEdge(
+                        source_id=source_node.id,
+                        target_id=target_node.id,
+                        edge_type=edge_type,
+                    )
+                    graph_store.add_edge(edge)
+                    edge_count += 1
+                except KeyError:
+                    pass  # node not found, skip
+
+    logger.info(
+        "Extracted %d new memories and %d edges at turn %d",
+        len(new_nodes), edge_count, current_turn,
+    )
     return {"new_memories": new_nodes}
 
 
