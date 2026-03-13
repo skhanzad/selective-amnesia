@@ -37,8 +37,19 @@ agent:
     - "content": the fact/preference/event as a concise string
     - "node_type": one of "entity", "fact", "event", "user_preference", "task", "belief"
     - "importance": float 0.0-1.0 (how important is this to remember?)
+    - "edges": optional list of relationships to OTHER memories in this batch, each with:
+      - "target_index": integer index of the related memory in this array
+      - "edge_type": one of "related_to", "supports", "contradicts", "supersedes", "caused_by", "refers_to", "temporal_before", "derived_from", "similar_to"
+
+    Example output:
+    [
+      {{"content": "User likes coffee", "node_type": "user_preference", "importance": 0.7, "edges": []}},
+      {{"content": "User dislikes tea", "node_type": "user_preference", "importance": 0.6, "edges": [{{"target_index": 0, "edge_type": "contradicts"}}]}}
+    ]
 
     Return a JSON array. If nothing worth remembering, return [].
+
+    {existing_memories}
 
     User: {user_message}
     Assistant: {assistant_message}

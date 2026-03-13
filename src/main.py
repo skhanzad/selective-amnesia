@@ -63,7 +63,13 @@ def main() -> None:
     parser.add_argument(
         "--load", default=None, help="Path to load saved memory graph"
     )
+    parser.add_argument(
+        "--debug", action="store_true", help="Enable debug logging"
+    )
     args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger("src").setLevel(logging.DEBUG)
 
     load_dotenv()
     config = load_config(args.config)

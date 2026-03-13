@@ -137,14 +137,25 @@ def extract_memories(
     agent_cfg = config.get("agent", {})
     extraction_prompt = agent_cfg.get("extraction_prompt", "")
 
+    # Build existing memory summary so the LLM can link to them
+    existing_nodes = graph_store.get_all_nodes()
+    existing_summary = ""
+    if existing_nodes:
+        lines = ["Existing memories (you may reference these by index for edges):"]
+        for i, n in enumerate(existing_nodes[:20]):  # cap to avoid prompt bloat
+            lines.append(f"  [{i}] ({n.node_type.value}) {n.content[:80]}")
+        existing_summary = "\\n".join(lines)
+
     prompt = extraction_prompt.format(
         user_message=last_user,
         assistant_message=last_assistant,
+        existing_memories=existing_summary if existing_summary else "No existing memories yet.",
     )
 
     try:
         result = llm.invoke([HumanMessage(content=prompt)])
         raw = result.content.strip()
+        logger.debug("Memory extraction raw LLM output: %s", raw[:500])
 
         # Try to parse JSON from the response
         # Handle cases where LLM wraps JSON in markdown code blocks
@@ -153,12 +164,21 @@ def extract_memories(
         elif "```" in raw:
             raw = raw.split("```")[1].split("```")[0].strip()
 
+        # Try to find a JSON array in the response
+        start = raw.find("[")
+        end = raw.rfind("]")
+        if start != -1 and end != -1:
+            raw = raw[start : end + 1]
+
         memories_data = json.loads(raw)
         if not isinstance(memories_data, list):
             memories_data = [memories_data]
 
-    except (json.JSONDecodeError, IndexError, Exception) as e:
-        logger.warning("Failed to parse memory extraction: %s", e)
+    except json.JSONDecodeError as e:
+        logger.warning("Failed to parse memory extraction JSON: %s\nRaw: %s", e, raw[:300])
+        return {"new_memories": []}
+    except Exception as e:
+        logger.warning("Memory extraction failed: %s", e, exc_info=True)
         return {"new_memories": []}
 
     # Create MemoryNode objects and add to graph
