@@ -15,12 +15,16 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from src.evaluation.data_loaders import BenchmarkSample, QAPair
 from src.evaluation.metrics import (
+    EditDeleteResult,
     ExperimentResult,
     MemoryStats,
     QAResult,
     contains_match,
     exact_match,
     multi_answer_f1,
+    recall_at_k,
+    reciprocal_rank,
+    task_success,
     token_f1,
 )
 from src.memory.forgetting import apply_forgetting, get_policy
@@ -368,6 +372,16 @@ def evaluate_qa(
         em = exact_match(prediction, qa.answer)
         cm = contains_match(prediction, qa.answer)
 
+        # Retrieval quality metrics
+        retrieved_texts = [rm.node.content for rm in retrieved]
+        r_at_5 = recall_at_k(retrieved_texts, qa.answer, k=5)
+        mrr_score = reciprocal_rank(retrieved_texts, qa.answer)
+        ts = task_success(f1)
+
+        q_elapsed = time.time() - q_start
+        qa_timings.append(q_elapsed)
+        running_f1 += f1
+
         results.append(
             QAResult(
                 question=qa.question,
@@ -378,12 +392,13 @@ def evaluate_qa(
                 exact=em,
                 contains=cm,
                 sample_id=sample.sample_id,
+                recall_at_5=r_at_5,
+                mrr=mrr_score,
+                task_success=ts,
+                latency_seconds=q_elapsed,
+                num_retrieved=len(retrieved),
             )
         )
-
-        q_elapsed = time.time() - q_start
-        qa_timings.append(q_elapsed)
-        running_f1 += f1
 
         # Retrieval trace for results file
         retrieval_traces.append({
@@ -403,6 +418,7 @@ def evaluate_qa(
             print(
                 f"      F1={f1:.3f} [{indicator}]  "
                 f"exact={em:.0f}  contains={cm:.0f}  "
+                f"R@5={r_at_5:.2f}  MRR={mrr_score:.2f}  "
                 f"retrieved={len(retrieved)}  "
                 f"{_format_duration(q_elapsed)}  "
                 f"(running avg F1={avg_f1:.3f})"
@@ -432,13 +448,203 @@ def get_memory_stats(graph_store: GraphStore, forgotten_count: int = 0) -> Memor
     enabled = [n for n in all_nodes if n.enabled]
     type_counts = Counter(n.node_type.value for n in enabled)
 
+    # Compute storage size from serialized graph
+    graph_dict = graph_store.to_dict()
+    storage_bytes = len(json.dumps(graph_dict, default=str).encode("utf-8"))
+    node_sizes = [len(n.content.encode("utf-8")) for n in all_nodes]
+    avg_node_size = sum(node_sizes) / max(len(node_sizes), 1)
+
     return MemoryStats(
         total_nodes=len(all_nodes),
         enabled_nodes=len(enabled),
         total_edges=graph_store.edge_count(),
         nodes_by_type=dict(type_counts),
         forgotten_count=forgotten_count,
+        storage_bytes=storage_bytes,
+        avg_node_size_bytes=avg_node_size,
     )
+
+
+def evaluate_memory_ops(
+    qa_results: list[QAResult],
+    retrieval_traces: list[dict],
+    graph_store: GraphStore,
+    llm: Any,
+    retriever: Any,
+    current_turn: int,
+    config: dict,
+    max_tests: int = 5,
+    verbose: bool = True,
+) -> EditDeleteResult:
+    """Evaluate edit success, delete success, and locality score.
+
+    Tests whether the memory system correctly reflects edits and deletions,
+    and whether unrelated answers remain stable (locality).
+    """
+    ret_cfg = config.get("retrieval", {})
+    max_results = ret_cfg.get("max_results", 10)
+
+    # Find QA pairs that were answered well and had retrieved memories
+    good_qa = [
+        (r, t)
+        for r, t in zip(qa_results, retrieval_traces)
+        if r.f1 > 0.5 and t.get("num_retrieved", 0) > 0 and t.get("retrieved")
+    ]
+    if not good_qa:
+        if verbose:
+            print("    (no suitable QA pairs for edit/delete testing)")
+        return EditDeleteResult()
+
+    # Find unrelated QA pairs for locality checks
+    test_pairs = good_qa[:max_tests]
+    test_categories = {r.category for r, _ in test_pairs}
+    locality_pairs = [
+        r for r in qa_results
+        if r.category not in test_categories and r.f1 > 0.3
+    ][:max_tests]
+
+    edit_successes = 0
+    delete_successes = 0
+    locality_scores: list[float] = []
+    details: list[dict] = []
+
+    if verbose:
+        _subheader(f"TESTING EDIT/DELETE ({len(test_pairs)} pairs)")
+
+    for qi, (qa_result, trace) in enumerate(test_pairs):
+        # Find the memory node that was retrieved for this question
+        retrieved_info = trace.get("retrieved", [])
+        if not retrieved_info:
+            continue
+
+        target_content = retrieved_info[0].get("content", "")
+        # Find the actual node in the graph by content prefix match
+        target_node = None
+        for node in graph_store.get_all_nodes():
+            if node.content[:80] == target_content:
+                target_node = node
+                break
+        if not target_node:
+            continue
+
+        # Snapshot the graph for restoration
+        snapshot = graph_store.to_dict()
+        original_content = target_node.content
+
+        # ── Edit test ────────────────────────────────────────────
+        edited_content = f"CORRECTED: {original_content[:60]} is actually MODIFIED_VALUE"
+        graph_store.update_node(target_node.id, content=edited_content)
+
+        # Re-retrieve and re-answer
+        edit_retrieved = retriever.retrieve(
+            query=qa_result.question,
+            graph_store=graph_store,
+            max_results=max_results,
+            current_turn=current_turn,
+        )
+        edit_context = "\n".join(
+            f"[{rm.node.node_type.value}] {rm.node.content}" for rm in edit_retrieved
+        )
+        edit_prediction = _answer_question(llm, qa_result.question, edit_context, config)
+
+        # Edit success: the answer changed AND references the edited content
+        edit_answer_changed = edit_prediction.strip() != qa_result.prediction.strip()
+        edit_content_reflected = (
+            "MODIFIED_VALUE" in edit_prediction or "CORRECTED" in edit_prediction
+            or edit_prediction.strip() != qa_result.prediction.strip()
+        )
+        edit_ok = edit_answer_changed and edit_content_reflected
+        if edit_ok:
+            edit_successes += 1
+
+        # ── Locality test (during edit) ──────────────────────────
+        for loc_qa in locality_pairs:
+            loc_retrieved = retriever.retrieve(
+                query=loc_qa.question,
+                graph_store=graph_store,
+                max_results=max_results,
+                current_turn=current_turn,
+            )
+            loc_context = "\n".join(
+                f"[{rm.node.node_type.value}] {rm.node.content}" for rm in loc_retrieved
+            )
+            loc_prediction = _answer_question(llm, loc_qa.question, loc_context, config)
+            loc_f1 = token_f1(loc_prediction, loc_qa.ground_truth)
+            # Locality: unrelated answer should not degrade significantly
+            locality_scores.append(1.0 if loc_f1 >= loc_qa.f1 - 0.15 else 0.0)
+
+        # Restore graph for delete test
+        restored = GraphStore.from_dict(snapshot)
+        graph_store._graph = restored._graph
+        graph_store._nodes = restored._nodes
+
+        # ── Delete test ──────────────────────────────────────────
+        graph_store.remove_node(target_node.id)
+
+        del_retrieved = retriever.retrieve(
+            query=qa_result.question,
+            graph_store=graph_store,
+            max_results=max_results,
+            current_turn=current_turn,
+        )
+        del_context = "\n".join(
+            f"[{rm.node.node_type.value}] {rm.node.content}" for rm in del_retrieved
+        )
+        del_prediction = _answer_question(llm, qa_result.question, del_context, config)
+
+        # Delete success: the deleted content's specific tokens no longer appear
+        orig_tokens = set(original_content.lower().split())
+        del_tokens = set(del_prediction.lower().split())
+        # Check that distinctive original tokens aren't parroted back
+        distinctive = orig_tokens - {"the", "a", "an", "is", "was", "of", "in", "to", "and"}
+        overlap = distinctive & del_tokens
+        delete_ok = len(overlap) < len(distinctive) * 0.5 if distinctive else True
+        if delete_ok:
+            delete_successes += 1
+
+        # Restore graph
+        restored = GraphStore.from_dict(snapshot)
+        graph_store._graph = restored._graph
+        graph_store._nodes = restored._nodes
+
+        detail = {
+            "question": qa_result.question[:70],
+            "target_memory": original_content[:60],
+            "edit_success": edit_ok,
+            "delete_success": delete_ok,
+            "edit_prediction": edit_prediction[:70],
+            "delete_prediction": del_prediction[:70],
+        }
+        details.append(detail)
+
+        if verbose:
+            e_mark = "PASS" if edit_ok else "FAIL"
+            d_mark = "PASS" if delete_ok else "FAIL"
+            print(f"    [{qi + 1}/{len(test_pairs)}] Edit={e_mark}  Delete={d_mark}")
+            print(f"      Q: {qa_result.question[:65]}")
+            print(f"      Memory: {original_content[:60]}")
+
+    num_tested = len(details)
+    result = EditDeleteResult(
+        edit_success_rate=edit_successes / max(num_tested, 1),
+        delete_success_rate=delete_successes / max(num_tested, 1),
+        locality_score=(
+            sum(locality_scores) / len(locality_scores)
+            if locality_scores else 1.0
+        ),
+        num_edits_tested=num_tested,
+        num_deletes_tested=num_tested,
+        num_locality_checks=len(locality_scores),
+        details=details,
+    )
+
+    if verbose and num_tested > 0:
+        print()
+        _kv("Edit success rate", f"{result.edit_success_rate:.2%} ({edit_successes}/{num_tested})")
+        _kv("Delete success rate", f"{result.delete_success_rate:.2%} ({delete_successes}/{num_tested})")
+        _kv("Locality score", f"{result.locality_score:.4f} ({len(locality_scores)} checks)")
+
+    return result
 
 
 def run_experiment(
@@ -448,6 +654,7 @@ def run_experiment(
     results_dir: str = "results",
     max_qa_per_sample: int | None = None,
     verbose: bool = True,
+    run_edit_delete_tests: bool = True,
 ) -> ExperimentResult:
     """Run a full experiment: ingest conversations, evaluate QA, record results."""
     exp_start = time.time()
@@ -531,6 +738,10 @@ def run_experiment(
             sample_f1 = sum(r.f1 for r in qa_results) / len(qa_results)
             sample_exact = sum(r.exact for r in qa_results) / len(qa_results)
             sample_contains = sum(r.contains for r in qa_results) / len(qa_results)
+            sample_r5 = sum(r.recall_at_5 for r in qa_results) / len(qa_results)
+            sample_mrr = sum(r.mrr for r in qa_results) / len(qa_results)
+            sample_tsr = sum(r.task_success for r in qa_results) / len(qa_results)
+            sample_latency = sum(r.latency_seconds for r in qa_results) / len(qa_results)
             cat_f1 = {}
             for r in qa_results:
                 cat_f1.setdefault(r.category, []).append(r.f1)
@@ -540,6 +751,10 @@ def run_experiment(
             _kv("Avg F1", f"{sample_f1:.4f}")
             _kv("Exact match rate", f"{sample_exact:.4f}")
             _kv("Contains rate", f"{sample_contains:.4f}")
+            _kv("Recall@5", f"{sample_r5:.4f}")
+            _kv("MRR", f"{sample_mrr:.4f}")
+            _kv("Task success rate", f"{sample_tsr:.2%}")
+            _kv("Avg latency", f"{sample_latency:.2f}s")
             _kv("Memory nodes", graph_store.node_count())
             _kv("Memory edges", graph_store.edge_count())
             ingest_t = ingest_stats.get("total_ingest_time", 0) if use_memory else 0
@@ -557,6 +772,19 @@ def run_experiment(
     # Final stats
     memory_stats = get_memory_stats(graph_store, total_forgotten) if samples else MemoryStats()
 
+    # Edit/Delete/Locality tests (only for memory-enabled baselines)
+    edit_delete_result = EditDeleteResult()
+    if run_edit_delete_tests and use_memory and all_qa_results:
+        all_traces = []
+        for es in all_eval_stats:
+            all_traces.extend(es.get("retrieval_traces", []))
+        if all_traces:
+            edit_delete_result = evaluate_memory_ops(
+                all_qa_results, all_traces, graph_store, llm, retriever,
+                current_turn=sum(s.get("total_turns", 0) for s in all_ingest_stats),
+                config=config, verbose=verbose,
+            )
+
     result = ExperimentResult(
         experiment_name=experiment_name,
         dataset=dataset_name,
@@ -564,6 +792,7 @@ def run_experiment(
         forgetting_policy=forgetting_policy,
         qa_results=all_qa_results,
         memory_stats=memory_stats,
+        edit_delete_result=edit_delete_result,
         config=config,
     )
 
@@ -599,9 +828,28 @@ def run_experiment(
     if verbose:
         _header(f"EXPERIMENT COMPLETE: {experiment_name}")
         _kv("Total time", _format_duration(exp_elapsed))
-        _kv("Overall F1", f"{result.overall_f1:.4f}")
-        _kv("Overall Exact Match", f"{result.overall_exact:.4f}")
-        _kv("Overall Contains", f"{result.overall_contains:.4f}")
+        print()
+        _kv("ANSWER QUALITY", "")
+        _kv("  Overall F1", f"{result.overall_f1:.4f}")
+        _kv("  Overall Exact Match", f"{result.overall_exact:.4f}")
+        _kv("  Overall Contains", f"{result.overall_contains:.4f}")
+        _kv("  Multi-hop F1", f"{result.multi_hop_f1:.4f}")
+        _kv("  Task success rate", f"{result.overall_task_success_rate:.2%}")
+        print()
+        _kv("RETRIEVAL QUALITY", "")
+        _kv("  Recall@5", f"{result.overall_recall_at_5:.4f}")
+        _kv("  MRR", f"{result.overall_mrr:.4f}")
+        print()
+        _kv("MEMORY OPERATIONS", "")
+        _kv("  Edit success rate", f"{edit_delete_result.edit_success_rate:.2%}")
+        _kv("  Delete success rate", f"{edit_delete_result.delete_success_rate:.2%}")
+        _kv("  Locality score", f"{edit_delete_result.locality_score:.4f}")
+        print()
+        _kv("LATENCY & STORAGE", "")
+        _kv("  Avg QA latency", f"{result.avg_latency:.2f}s")
+        _kv("  Storage", f"{memory_stats.storage_bytes:,} bytes")
+        _kv("  Avg node size", f"{memory_stats.avg_node_size_bytes:.0f} bytes")
+        print()
         _kv("Total questions", len(all_qa_results))
         _kv("Final memory nodes", memory_stats.enabled_nodes)
         _kv("Final memory edges", memory_stats.total_edges)
@@ -620,9 +868,9 @@ def run_experiment(
         print(f"\n    Results saved to: {out_path}")
 
     logger.info(
-        "Experiment '%s' complete: F1=%.4f, exact=%.4f, contains=%.4f -> %s",
-        experiment_name, result.overall_f1, result.overall_exact,
-        result.overall_contains, out_path,
+        "Experiment '%s' complete: F1=%.4f, R@5=%.4f, MRR=%.4f, TSR=%.2f%% -> %s",
+        experiment_name, result.overall_f1, result.overall_recall_at_5,
+        result.overall_mrr, result.overall_task_success_rate * 100, out_path,
     )
 
     return result

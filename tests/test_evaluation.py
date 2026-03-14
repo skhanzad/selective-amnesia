@@ -7,6 +7,9 @@ from src.evaluation.metrics import (
     exact_match,
     multi_answer_f1,
     normalize_answer,
+    recall_at_k,
+    reciprocal_rank,
+    task_success,
     token_f1,
     ExperimentResult,
     QAResult,
@@ -56,6 +59,38 @@ def test_exact_match():
 def test_contains_match():
     assert contains_match("I think the answer is 42", "42") == 1.0
     assert contains_match("no match", "42") == 0.0
+
+
+def test_recall_at_k():
+    retrieved = ["User likes dark roast coffee", "Weather is sunny", "User lives in NYC"]
+    assert recall_at_k(retrieved, "dark roast coffee", k=5) > 0
+    assert recall_at_k(retrieved, "completely unrelated answer xyz", k=5) == 0.0
+    assert recall_at_k([], "coffee", k=5) == 0.0
+
+
+def test_reciprocal_rank():
+    retrieved = ["Weather is sunny", "User likes dark roast coffee", "Random info"]
+    # "coffee" is relevant to index 1 (second position) → RR = 1/2
+    rr = reciprocal_rank(retrieved, "dark roast coffee")
+    assert rr == pytest.approx(0.5)
+    # No relevant results
+    assert reciprocal_rank(retrieved, "completely unrelated xyz") == 0.0
+    assert reciprocal_rank([], "coffee") == 0.0
+
+
+def test_reciprocal_rank_first():
+    retrieved = ["User likes dark roast coffee", "Other info"]
+    rr = reciprocal_rank(retrieved, "dark roast coffee")
+    assert rr == pytest.approx(1.0)
+
+
+def test_task_success():
+    assert task_success(0.8) == 1.0
+    assert task_success(0.5) == 1.0
+    assert task_success(0.3) == 0.0
+    assert task_success(0.0) == 0.0
+    assert task_success(0.6, threshold=0.7) == 0.0
+    assert task_success(0.7, threshold=0.7) == 1.0
 
 
 def test_experiment_result_aggregation():

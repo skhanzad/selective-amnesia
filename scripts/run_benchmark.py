@@ -74,6 +74,7 @@ def run_suite(
     max_qa: int | None,
     results_dir: str,
     verbose: bool = True,
+    run_edit_delete_tests: bool = True,
 ) -> list[dict]:
     """Run all requested experiments and return summary."""
     suite_start = time.time()
@@ -151,6 +152,7 @@ def run_suite(
                     results_dir=results_dir,
                     max_qa_per_sample=max_qa,
                     verbose=verbose,
+                    run_edit_delete_tests=run_edit_delete_tests,
                 )
                 elapsed = time.time() - start
 
@@ -161,6 +163,15 @@ def run_suite(
                     "overall_f1": round(result.overall_f1, 4),
                     "overall_exact": round(result.overall_exact, 4),
                     "overall_contains": round(result.overall_contains, 4),
+                    "recall_at_5": round(result.overall_recall_at_5, 4),
+                    "mrr": round(result.overall_mrr, 4),
+                    "multi_hop_f1": round(result.multi_hop_f1, 4),
+                    "task_success_rate": round(result.overall_task_success_rate, 4),
+                    "edit_success": round(result.edit_delete_result.edit_success_rate, 4),
+                    "delete_success": round(result.edit_delete_result.delete_success_rate, 4),
+                    "locality_score": round(result.edit_delete_result.locality_score, 4),
+                    "avg_latency": round(result.avg_latency, 3),
+                    "storage_bytes": result.memory_stats.storage_bytes,
                     "f1_by_category": {k: round(v, 4) for k, v in result.f1_by_category().items()},
                     "num_questions": len(result.qa_results),
                     "memory_nodes": result.memory_stats.enabled_nodes,
@@ -191,16 +202,17 @@ def run_suite(
 
 def print_comparison_table(results: list[dict], total_time: float = 0) -> None:
     """Print a rich comparison table of all experiment results."""
-    _header("FINAL COMPARISON", char="*", width=90)
+    _header("FINAL COMPARISON", char="*", width=120)
 
-    # Main table
+    # Answer quality table
+    print(f"    ANSWER QUALITY")
     print(
         f"    {'Experiment':<35} "
-        f"{'F1':>7} {'Exact':>7} {'Cont.':>7} "
-        f"{'Nodes':>6} {'Edges':>6} {'Forgot':>6} "
+        f"{'F1':>7} {'Exact':>7} {'Cont.':>7} {'MH-F1':>7} {'TSR':>7} "
+        f"{'Nodes':>6} {'Forgot':>6} "
         f"{'Time':>8}"
     )
-    print(f"    {'':=<35} {'':=>7} {'':=>7} {'':=>7} {'':=>6} {'':=>6} {'':=>6} {'':=>8}")
+    print(f"    {'':=<35} {'':=>7} {'':=>7} {'':=>7} {'':=>7} {'':=>7} {'':=>6} {'':=>6} {'':=>8}")
 
     for r in results:
         if "error" in r:
@@ -211,11 +223,41 @@ def print_comparison_table(results: list[dict], total_time: float = 0) -> None:
             f"{r['overall_f1']:>7.4f} "
             f"{r['overall_exact']:>7.4f} "
             f"{r['overall_contains']:>7.4f} "
+            f"{r.get('multi_hop_f1', 0):>7.4f} "
+            f"{r.get('task_success_rate', 0):>7.2%} "
             f"{r.get('memory_nodes', 0):>6} "
-            f"{r.get('memory_edges', 0):>6} "
             f"{r.get('forgotten', 0):>6} "
             f"{_format_duration(r.get('elapsed_seconds', 0)):>8}"
         )
+
+    # Retrieval & memory ops table
+    has_retrieval = any(r.get("recall_at_5", 0) > 0 for r in results if "error" not in r)
+    if has_retrieval:
+        print()
+        print(f"    RETRIEVAL & MEMORY OPERATIONS")
+        print(
+            f"    {'Experiment':<35} "
+            f"{'R@5':>7} {'MRR':>7} "
+            f"{'Edit%':>7} {'Del%':>7} {'Local':>7} "
+            f"{'Lat(s)':>7} {'Store':>10}"
+        )
+        print(f"    {'':=<35} {'':=>7} {'':=>7} {'':=>7} {'':=>7} {'':=>7} {'':=>7} {'':=>10}")
+
+        for r in results:
+            if "error" in r:
+                continue
+            storage = r.get("storage_bytes", 0)
+            storage_str = f"{storage:,}" if storage else "N/A"
+            print(
+                f"    {r['experiment']:<35} "
+                f"{r.get('recall_at_5', 0):>7.4f} "
+                f"{r.get('mrr', 0):>7.4f} "
+                f"{r.get('edit_success', 0):>7.2%} "
+                f"{r.get('delete_success', 0):>7.2%} "
+                f"{r.get('locality_score', 0):>7.4f} "
+                f"{r.get('avg_latency', 0):>7.2f} "
+                f"{storage_str:>10}"
+            )
 
     # Per-category F1 breakdown
     categories = set()
@@ -228,7 +270,6 @@ def print_comparison_table(results: list[dict], total_time: float = 0) -> None:
         print(f"    {'':=<90}")
         print(f"    F1 BY CATEGORY")
         print(f"    {'':=<90}")
-        # Header
         cat_header = "    " + f"{'Experiment':<35} " + " ".join(f"{c:>13}" for c in cats)
         print(cat_header)
         print(f"    {'':=<35} " + " ".join(f"{'':=>13}" for _ in cats))
@@ -248,11 +289,13 @@ def print_comparison_table(results: list[dict], total_time: float = 0) -> None:
         print(f"    {'':=<90}")
         print(f"    DELTA vs B0 (no memory)")
         print(f"    {'':=<90}")
-        print(f"    {'Experiment':<35} {'dF1':>8} {'dExact':>8} {'dCont.':>8}")
-        print(f"    {'':=<35} {'':=>8} {'':=>8} {'':=>8}")
+        print(
+            f"    {'Experiment':<35} "
+            f"{'dF1':>8} {'dExact':>8} {'dCont.':>8} {'dTSR':>8}"
+        )
+        print(f"    {'':=<35} {'':=>8} {'':=>8} {'':=>8} {'':=>8}")
 
         for r in other_results:
-            # Find matching b0 for same dataset
             b0 = next(
                 (b for b in b0_results if b.get("dataset") == r.get("dataset")),
                 None,
@@ -261,20 +304,23 @@ def print_comparison_table(results: list[dict], total_time: float = 0) -> None:
                 df1 = r["overall_f1"] - b0["overall_f1"]
                 dem = r["overall_exact"] - b0["overall_exact"]
                 dcm = r["overall_contains"] - b0["overall_contains"]
+                dtsr = r.get("task_success_rate", 0) - b0.get("task_success_rate", 0)
                 sign_f1 = "+" if df1 >= 0 else ""
                 sign_em = "+" if dem >= 0 else ""
                 sign_cm = "+" if dcm >= 0 else ""
+                sign_tsr = "+" if dtsr >= 0 else ""
                 print(
                     f"    {r['experiment']:<35} "
                     f"{sign_f1}{df1:>7.4f} "
                     f"{sign_em}{dem:>7.4f} "
-                    f"{sign_cm}{dcm:>7.4f}"
+                    f"{sign_cm}{dcm:>7.4f} "
+                    f"{sign_tsr}{dtsr:>7.2%}"
                 )
 
     if total_time:
         print(f"\n    Total suite time: {_format_duration(total_time)}")
 
-    print(f"    {'*' * 90}")
+    print(f"    {'*' * 120}")
 
 
 def main():
@@ -317,6 +363,11 @@ def main():
         action="store_true",
         help="Minimal output (no per-question details)",
     )
+    parser.add_argument(
+        "--no-edit-delete",
+        action="store_true",
+        help="Skip edit/delete/locality tests (faster runs)",
+    )
     args = parser.parse_args()
 
     # Configure logging
@@ -335,6 +386,7 @@ def main():
         max_qa=args.max_qa,
         results_dir=args.results_dir,
         verbose=not args.quiet,
+        run_edit_delete_tests=not args.no_edit_delete,
     )
 
 

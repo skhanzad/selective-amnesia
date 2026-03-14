@@ -298,14 +298,41 @@ Both are included as git submodules in `ext/`.
 
 ### Metrics
 
-| Metric          | Description                                                |
-|-----------------|------------------------------------------------------------|
-| Token F1        | Token-level F1 score after normalization                   |
-| Exact Match     | Binary match after normalization                           |
-| Contains Match  | Whether the ground truth is contained in the prediction    |
-| Per-category F1 | F1 broken down by question type                            |
-| Memory stats    | Node count, edge count, forgotten count, type distribution |
-| Timing          | Ingest time, evaluation time, total experiment time        |
+**Answer Quality:**
+
+| Metric            | Description                                                         |
+|-------------------|---------------------------------------------------------------------|
+| Token F1          | Token-level F1 score after normalization                            |
+| Exact Match       | Binary match after normalization                                    |
+| Contains Match    | Whether the ground truth is contained in the prediction             |
+| Multi-hop F1      | F1 specifically for multi-hop reasoning questions                   |
+| Task Success Rate | Fraction of questions answered above F1 threshold (default 0.5)     |
+| Per-category F1   | F1 broken down by question type                                     |
+
+**Retrieval Quality:**
+
+| Metric    | Description                                                                |
+|-----------|----------------------------------------------------------------------------|
+| Recall@k  | Fraction of top-k retrieved memories relevant to the ground truth answer   |
+| MRR       | Mean Reciprocal Rank — 1/position of the first relevant retrieved memory   |
+
+**Memory Operations:**
+
+| Metric         | Description                                                            |
+|----------------|------------------------------------------------------------------------|
+| Edit Success   | After editing a memory, does the system's answer reflect the change?   |
+| Delete Success | After deleting a memory, does the system stop referencing it?          |
+| Locality Score | Do unrelated answers remain stable after an edit or deletion?          |
+
+**Latency & Storage:**
+
+| Metric             | Description                                                |
+|--------------------|------------------------------------------------------------|
+| Avg QA Latency     | Average time per question (retrieval + generation)         |
+| Storage Bytes      | Total serialized size of the memory graph                  |
+| Avg Node Size      | Average content size per memory node in bytes              |
+| Memory Stats       | Node count, edge count, forgotten count, type distribution |
+| Timing             | Ingest time, evaluation time, total experiment time        |
 
 ## Extending the Project
 
