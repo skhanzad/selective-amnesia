@@ -1,0 +1,52 @@
+# B4: Graph memory WITH selective forgetting (hybrid policy)
+llm:
+  provider: "ollama"
+  model: "llama3.2"
+  temperature: 0.0
+
+memory:
+  max_nodes: 200
+  default_importance: 0.5
+  decay_rate: 0.05
+
+retrieval:
+  mode: "graph"
+  max_results: 10
+  neighbor_depth: 1
+  include_edge_context: true
+
+forgetting:
+  policy: "hybrid"
+  budget_target: 100
+  recency_weight: 0.4
+  importance_weight: 0.4
+  access_frequency_weight: 0.2
+  min_importance_to_keep: 0.3
+  run_every_n_turns: 3
+
+agent:
+  system_prompt: |
+    You are a helpful assistant with access to a persistent memory graph.
+    Use retrieved memories to give contextual, accurate responses.
+    If memories contradict each other, prefer the most recent one and note the contradiction.
+  extraction_prompt: |
+    Extract structured memories from this conversation turn.
+    Analyze the user message and assistant response below. Extract distinct facts,
+    preferences, entities, or events worth remembering.
+
+    For each memory, return a JSON object with:
+    - "content": the fact/preference/event as a concise string
+    - "node_type": one of "entity", "fact", "event", "user_preference", "task", "belief"
+    - "importance": float 0.0-1.0 (how important is this to remember?)
+    - "edges": optional list of relationships to OTHER memories in this batch, each with:
+      - "target_index": integer index of the related memory in this array
+      - "edge_type": one of "related_to", "supports", "contradicts", "supersedes", "refers_to"
+
+    Return a JSON array. If nothing worth remembering, return [].
+
+    {existing_memories}
+
+    User: {user_message}
+    Assistant: {assistant_message}
+
+    Extracted memories (JSON array):

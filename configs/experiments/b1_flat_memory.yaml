@@ -1,0 +1,45 @@
+# B1: Flat memory (recency-sorted list, no graph structure)
+llm:
+  provider: "ollama"
+  model: "llama3.2"
+  temperature: 0.0
+
+memory:
+  max_nodes: 200
+  default_importance: 0.5
+  decay_rate: 0.05
+
+retrieval:
+  mode: "flat"
+  max_results: 10
+  neighbor_depth: 1
+  include_edge_context: false
+
+forgetting:
+  policy: "none"
+  budget_target: 200
+  min_importance_to_keep: 0.3
+  run_every_n_turns: 5
+
+agent:
+  system_prompt: |
+    You are a helpful assistant with access to a persistent memory store.
+    Use retrieved memories to give contextual, accurate responses.
+  extraction_prompt: |
+    Extract structured memories from this conversation turn.
+    Analyze the user message and assistant response below. Extract distinct facts,
+    preferences, entities, or events worth remembering.
+
+    For each memory, return a JSON object with:
+    - "content": the fact/preference/event as a concise string
+    - "node_type": one of "entity", "fact", "event", "user_preference", "task", "belief"
+    - "importance": float 0.0-1.0 (how important is this to remember?)
+
+    Return a JSON array. If nothing worth remembering, return [].
+
+    {existing_memories}
+
+    User: {user_message}
+    Assistant: {assistant_message}
+
+    Extracted memories (JSON array):
