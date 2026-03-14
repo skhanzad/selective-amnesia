@@ -92,7 +92,7 @@ selective-amnesia/
 
 ```bash
 # Clone with submodules (for benchmark datasets)
-git clone --recurse-submodules https://github.com/<your-user>/selective-amnesia.git
+git clone --recurse-submodules https://github.com/skhanzad/selective-amnesia.git
 cd selective-amnesia
 
 # Install dependencies
@@ -280,7 +280,7 @@ Experiment-specific configs in `configs/experiments/` override these defaults fo
 
 ## Experimental Design
 
-### Baselines
+### Our Baselines
 
 | ID | Name                    | Retrieval | Forgetting | Budget |
 |----|-------------------------|-----------|------------|--------|
@@ -291,10 +291,57 @@ Experiment-specific configs in `configs/experiments/` override these defaults fo
 
 ### Datasets
 
-- **[LoCoMo](https://github.com/snap-stanford/locomo)** — Multi-session dialogue benchmark with 5 question categories: multi-hop, temporal, contextual, open-domain, adversarial
-- **[LongMemEval](https://github.com/xiaowu0162/LongMemEval)** — Long-context memory evaluation with oracle variant (evidence-only sessions)
+- **[LoCoMo](https://github.com/snap-stanford/locomo)** (ACL 2024) — 10 very long-term dialogues (~600 turns, ~16K tokens each, up to 32 sessions). QA task with 5 question categories. Metric: **F1 score**.
+- **[LongMemEval](https://github.com/xiaowu0162/LongMemEval)** (ICLR 2025) — 500 questions testing 5 long-term memory abilities across timestamped multi-session chat histories. Metric: **Accuracy** (GPT-4o judge).
 
 Both are included as git submodules in `ext/`.
+
+### Comparison: LoCoMo QA (F1 Score)
+
+Published baselines from the LoCoMo paper alongside our approach. All scores are F1 on the question-answering task (higher is better).
+
+| Method                              | Single-Hop | Multi-Hop | Temporal | Open Domain | Adversarial | **Overall** |
+|-------------------------------------|:----------:|:---------:|:--------:|:-----------:|:-----------:|:-----------:|
+| **Human**                           |   95.1     |   85.8    |   92.6   |    75.4     |    89.4     |  **87.9**   |
+| *Base LLMs*                         |            |           |          |             |             |             |
+| Mistral-7B-Instruct (8K)            |   19.1     |   15.1    |    9.3   |     8.6     |    28.9     |    18.7     |
+| Llama-2-70b-chat (4K)               |   20.8     |   18.2    |   15.9   |    18.8     |    15.7     |    18.4     |
+| Llama-3-70B-Instruct (4K)           |   17.0     |   17.0    |   12.0   |    13.0     |    80.0     |    30.1     |
+| *Long-context LLMs*                 |            |           |          |             |             |             |
+| gpt-3.5-turbo (16K)                 |   52.6     |   36.7    |   24.3   |    24.0     |    14.8     |    35.9     |
+| gemini-1.0-pro (32K)                |   62.4     |   35.3    |   34.2   |    19.0     |     5.2     |    39.1     |
+| claude-3-sonnet (200K)              |   70.7     |   38.1    |   26.9   |    52.2     |     2.5     |    42.8     |
+| gpt-4-turbo (128K)                  |   72.3     |   51.5    |   51.4   |    38.5     |    15.7     |    51.6     |
+| *RAG (gpt-3.5-turbo reader)*        |            |           |          |             |             |             |
+| + Dialog retrieval (top-50)         |   60.1     |   40.6    |   36.9   |    22.4     |     9.9     |    40.5     |
+| + Observation retrieval (top-5)     |   54.3     |   36.3    |   40.7   |    26.5     |    32.5     |    43.3     |
+| + Summary retrieval (top-10)        |   36.0     |   29.9    |   37.5   |    22.2     |    24.0     |    32.0     |
+| *Selective Amnesia (ours)*          |            |           |          |             |             |             |
+| B0 — no external memory             |     —      |     —     |    —     |      —      |      —      |      —      |
+| B1 — flat memory                    |     —      |     —     |    —     |      —      |      —      |      —      |
+| B3 — graph, no forgetting           |     —      |     —     |    —     |      —      |      —      |      —      |
+| **B4 — graph + hybrid forgetting**  |     —      |     —     |    —     |      —      |      —      |      —      |
+
+### Comparison: LongMemEval (Accuracy)
+
+Published baselines from the LongMemEval paper alongside our approach. Accuracy is judged by GPT-4o (higher is better).
+
+| Method                              | Info Extraction | Multi-Session | Knowledge Update | Temporal Reasoning | **Overall** |
+|-------------------------------------|:---------------:|:-------------:|:----------------:|:------------------:|:-----------:|
+| *Commercial chat assistants*        |                 |               |                  |                    |             |
+| ChatGPT (GPT-4o-mini)               |     1.000       |    0.647      |      0.667       |       0.652        |   0.711     |
+| ChatGPT (GPT-4o)                    |     0.688       |    0.441      |      0.833       |       0.435        |   0.577     |
+| Coze (GPT-4o)                       |     0.813       |    0.147      |      0.208       |       0.391        |   0.330     |
+| Coze (GPT-3.5-turbo)                |     0.625       |    0.118      |      0.375       |       0.043        |   0.247     |
+| *Upper bound*                       |                 |               |                  |                    |             |
+| Offline reading (oracle)            |       —         |      —        |        —         |         —          |   0.918     |
+| *Selective Amnesia (ours)*          |                 |               |                  |                    |             |
+| B0 — no external memory             |       —         |      —        |        —         |         —          |     —       |
+| B1 — flat memory                    |       —         |      —        |        —         |         —          |     —       |
+| B3 — graph, no forgetting           |       —         |      —        |        —         |         —          |     —       |
+| **B4 — graph + hybrid forgetting**  |       —         |      —        |        —         |         —          |     —       |
+
+> **Note**: Our results (marked —) are to be filled after running the benchmark suite. Run `uv run python scripts/run_benchmark.py --dataset all` to populate these numbers. The published baselines are sourced from the LoCoMo paper (Maharana et al., ACL 2024) and the LongMemEval paper (Wu et al., ICLR 2025).
 
 ### Metrics
 
