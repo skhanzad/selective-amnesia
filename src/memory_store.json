@@ -1,0 +1,54 @@
+{
+  "nodes": [
+    {
+      "id": "d8c6c42444a0",
+      "content": "Mike is a person who initiated the conversation.",
+      "type": "entity"
+    },
+    {
+      "id": "77ab135414e5",
+      "content": "I am an AI, a computer program designed to simulate human-like conversations.",
+      "type": "entity"
+    },
+    {
+      "id": "8b9f9c9ac7e9",
+      "content": "Lora is the user's sister",
+      "type": "entity"
+    },
+    {
+      "id": "92c5b9d12191",
+      "content": "Mike (human) mentioned his sister's name as Lora and inquired about where she lives or if he was thinking of visiting her, but it seems to be a mistake since there is no previous mention of Mike having a sister named Lora.",
+      "type": "fact"
+    },
+    {
+      "id": "f4980c996d49",
+      "content": "Mike",
+      "type": "entity"
+    },
+    {
+      "id": "225be6f0a401",
+      "content": "Lora",
+      "type": "entity"
+    }
+  ],
+  "edges": [
+    {
+      "id": "3e8ea0d14085",
+      "source": "d8c6c42444a0",
+      "target": "77ab135414e5",
+      "type": "related_to"
+    },
+    {
+      "id": "5d4183c2a820",
+      "source": "8b9f9c9ac7e9",
+      "target": "92c5b9d12191",
+      "type": "related_to"
+    },
+    {
+      "id": "e776292089b9",
+      "source": "f4980c996d49",
+      "target": "225be6f0a401",
+      "type": "related_to"
+    }
+  ]
+}

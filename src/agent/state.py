@@ -19,6 +19,7 @@ class State(TypedDict):
 
 
 def trimmed_messages(messages: List[BaseMessage], llm: Union[ChatOllama, ChatOpenAI]) -> List[BaseMessage]:
+    num_ctx = 4096
     if llm.model == "llama3.2":
         num_ctx = 131_072
     print(f"Trimming messages for {llm.model} with {num_ctx} tokens")

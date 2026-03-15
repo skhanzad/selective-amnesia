@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Set
 from pydantic import BaseModel, Field
 
 from memory.schemas import EdgeType, MemoryEdge, MemoryNode, NodeType
+from memory.graph_store import MemoryGraph
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +217,7 @@ class ForgetPolicy(BaseModel):
     # Core: apply the policy
     # ------------------------------------------------------------------
 
-    def apply(self, graph: "MemoryGraph") -> "MemoryGraph":  # noqa: F821
+    def apply(self, graph: MemoryGraph) -> MemoryGraph:
         """Return a new MemoryGraph with low-value nodes and edges removed.
 
         Steps:
@@ -227,7 +228,6 @@ class ForgetPolicy(BaseModel):
         5. Remove dangling edges.
         6. Clean up internal metadata for forgotten nodes.
         """
-        from memory.graph_store import MemoryGraph
 
         if not graph.nodes:
             return MemoryGraph(nodes=[], edges=[])
