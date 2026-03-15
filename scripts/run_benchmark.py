@@ -39,6 +39,7 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 from src.evaluation.data_loaders import load_locomo, load_longmemeval
 from src.evaluation.runner import run_experiment, _header, _kv, _format_duration
 from src.evaluation.metrics import ExperimentResult
+from src.evaluation.published_baselines import format_comparison
 
 BASELINE_CONFIGS = {
     "b0": "configs/experiments/b0_no_memory.yaml",
@@ -75,6 +76,7 @@ def run_suite(
     results_dir: str,
     verbose: bool = True,
     run_edit_delete_tests: bool = True,
+    use_gpt4o_judge: bool = False,
 ) -> list[dict]:
     """Run all requested experiments and return summary."""
     suite_start = time.time()
@@ -153,6 +155,7 @@ def run_suite(
                     max_qa_per_sample=max_qa,
                     verbose=verbose,
                     run_edit_delete_tests=run_edit_delete_tests,
+                    use_gpt4o_judge=use_gpt4o_judge,
                 )
                 elapsed = time.time() - start
 
@@ -317,6 +320,21 @@ def print_comparison_table(results: list[dict], total_time: float = 0) -> None:
                     f"{sign_tsr}{dtsr:>7.2%}"
                 )
 
+    # Published baseline comparison
+    datasets_in_results = {r.get("dataset") for r in results if "error" not in r}
+    for dataset in sorted(datasets_in_results):
+        our = {}
+        for r in results:
+            if r.get("dataset") != dataset or "error" in r:
+                continue
+            scores = dict(r.get("f1_by_category", {}))
+            scores["overall"] = r.get("overall_f1", 0.0)
+            our[r["experiment"]] = scores
+        if our:
+            print()
+            print(f"    COMPARISON WITH PUBLISHED BASELINES ({dataset.upper()})")
+            print(format_comparison(our, dataset))
+
     if total_time:
         print(f"\n    Total suite time: {_format_duration(total_time)}")
 
@@ -368,6 +386,11 @@ def main():
         action="store_true",
         help="Skip edit/delete/locality tests (faster runs)",
     )
+    parser.add_argument(
+        "--use-judge",
+        action="store_true",
+        help="Enable GPT-4o judge for LongMemEval accuracy",
+    )
     args = parser.parse_args()
 
     # Configure logging
@@ -387,6 +410,7 @@ def main():
         results_dir=args.results_dir,
         verbose=not args.quiet,
         run_edit_delete_tests=not args.no_edit_delete,
+        use_gpt4o_judge=args.use_judge,
     )
 
 

@@ -19,8 +19,10 @@ from src.evaluation.metrics import (
     ExperimentResult,
     MemoryStats,
     QAResult,
+    adversarial_check,
     contains_match,
     exact_match,
+    gpt4o_judge,
     multi_answer_f1,
     recall_at_k,
     reciprocal_rank,
@@ -30,7 +32,7 @@ from src.evaluation.metrics import (
 from src.memory.forgetting import apply_forgetting, get_policy
 from src.memory.graph_store import GraphStore
 from src.memory.retriever import get_retriever
-from src.memory.schemas import MemoryNode, NodeType
+from src.memory.schemas import EdgeType, MemoryEdge, MemoryNode, NodeType
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +154,7 @@ def _extract_memories_from_turn(
         return []
 
     default_imp = config.get("memory", {}).get("default_importance", 0.5)
+    existing_nodes = graph_store.get_all_nodes()
     new_nodes = []
     for mem in memories_data:
         if not isinstance(mem, dict) or "content" not in mem:
@@ -174,6 +177,44 @@ def _extract_memories_from_turn(
         )
         graph_store.add_node(node)
         new_nodes.append(node)
+
+    # Create edges from the LLM's edge specifications
+    # Ported from src/agent/nodes.py:215-256
+    for i, mem in enumerate(memories_data):
+        if not isinstance(mem, dict) or i >= len(new_nodes):
+            continue
+        source_node = new_nodes[i]
+
+        for edge_spec in mem.get("edges", []):
+            if not isinstance(edge_spec, dict):
+                continue
+
+            target_index = edge_spec.get("target_index")
+            edge_type_str = edge_spec.get("edge_type", "related_to")
+
+            try:
+                edge_type = EdgeType(edge_type_str)
+            except ValueError:
+                edge_type = EdgeType.related_to
+
+            # target_index can refer to another new node or an existing node
+            target_node = None
+            if isinstance(target_index, int):
+                if 0 <= target_index < len(new_nodes):
+                    target_node = new_nodes[target_index]
+                elif 0 <= target_index < len(existing_nodes):
+                    target_node = existing_nodes[target_index]
+
+            if target_node and target_node.id != source_node.id:
+                try:
+                    edge = MemoryEdge(
+                        source_id=source_node.id,
+                        target_id=target_node.id,
+                        edge_type=edge_type,
+                    )
+                    graph_store.add_edge(edge)
+                except KeyError:
+                    pass  # node not found, skip
 
     return new_nodes
 
@@ -318,6 +359,7 @@ def evaluate_qa(
     current_turn: int,
     config: dict,
     verbose: bool = True,
+    use_gpt4o_judge: bool = False,
 ) -> tuple[list[QAResult], dict]:
     """Evaluate all QA pairs for a sample using the populated memory graph.
 
@@ -346,12 +388,12 @@ def evaluate_qa(
             current_turn=current_turn,
         )
 
-        # Build context
+        # Build context using to_context_string() to include edge information
         context_parts = []
         retrieved_contents = []
         for rm in retrieved:
             node = rm.node
-            context_parts.append(f"[{node.node_type.value}] {node.content}")
+            context_parts.append(rm.to_context_string())
             retrieved_contents.append({
                 "content": node.content[:80],
                 "type": node.node_type.value,
@@ -363,20 +405,41 @@ def evaluate_qa(
         # Answer
         prediction = _answer_question(llm, qa.question, context, config)
 
-        # Score
-        if ";" in qa.answer:
-            f1 = multi_answer_f1(prediction, qa.answer)
+        # Score — category-specific evaluation matching LoCoMo protocol
+        category_id = qa.metadata.get("category_id")
+        answer_for_scoring = qa.answer
+
+        if category_id == 5:
+            # Adversarial: check for correct refusal
+            f1 = adversarial_check(prediction)
+        elif category_id == 1:
+            # Multi-hop: split on comma for sub-answer F1
+            f1 = multi_answer_f1(prediction, qa.answer, sep=",")
+        elif category_id == 3:
+            # Contextual: strip answer at first semicolon before scoring
+            answer_for_scoring = qa.answer.split(";")[0].strip()
+            f1 = token_f1(prediction, answer_for_scoring)
         else:
+            # Single-hop, temporal, open-domain, and LongMemEval types
             f1 = token_f1(prediction, qa.answer)
 
-        em = exact_match(prediction, qa.answer)
-        cm = contains_match(prediction, qa.answer)
+        em = exact_match(prediction, answer_for_scoring)
+        cm = contains_match(prediction, answer_for_scoring)
 
         # Retrieval quality metrics
         retrieved_texts = [rm.node.content for rm in retrieved]
         r_at_5 = recall_at_k(retrieved_texts, qa.answer, k=5)
         mrr_score = reciprocal_rank(retrieved_texts, qa.answer)
         ts = task_success(f1)
+
+        # Optional GPT-4o judge for LongMemEval
+        judge = None
+        if use_gpt4o_judge and sample.source == "longmemeval":
+            is_abstention = "_abs" in sample.sample_id
+            judge = gpt4o_judge(
+                qa.question, qa.answer, prediction,
+                qa.category, is_abstention,
+            )
 
         q_elapsed = time.time() - q_start
         qa_timings.append(q_elapsed)
@@ -397,6 +460,7 @@ def evaluate_qa(
                 task_success=ts,
                 latency_seconds=q_elapsed,
                 num_retrieved=len(retrieved),
+                judge_score=judge,
             )
         )
 
@@ -655,6 +719,7 @@ def run_experiment(
     max_qa_per_sample: int | None = None,
     verbose: bool = True,
     run_edit_delete_tests: bool = True,
+    use_gpt4o_judge: bool = False,
 ) -> ExperimentResult:
     """Run a full experiment: ingest conversations, evaluate QA, record results."""
     exp_start = time.time()
@@ -729,6 +794,7 @@ def run_experiment(
         qa_results, eval_stats = evaluate_qa(
             eval_sample, graph_store, llm, retriever,
             turn_count, config, verbose=verbose,
+            use_gpt4o_judge=use_gpt4o_judge,
         )
         all_qa_results.extend(qa_results)
         all_eval_stats.append(eval_stats)

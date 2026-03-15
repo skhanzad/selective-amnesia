@@ -3,6 +3,7 @@
 import pytest
 
 from src.evaluation.metrics import (
+    adversarial_check,
     contains_match,
     exact_match,
     multi_answer_f1,
@@ -43,12 +44,40 @@ def test_token_f1_empty():
     assert token_f1("", "hello") == 0.0
 
 
-def test_multi_answer_f1():
-    f1 = multi_answer_f1("coffee; tea", "coffee; tea")
+def test_token_f1_duplicates():
+    """Counter-based F1 handles duplicate tokens correctly."""
+    # "cat cat" has 2 "cat" tokens; "cat" has 1
+    # common = min(2,1) = 1; precision = 1/2, recall = 1/1
+    f1 = token_f1("cat cat", "cat")
+    assert f1 == pytest.approx(2/3, abs=0.01)
+
+
+def test_token_f1_stemming():
+    """Stemmer maps 'running' and 'runs' to same stem."""
+    f1 = token_f1("running", "runs")
+    assert f1 > 0.0  # stems should match
+
+
+def test_multi_answer_f1_comma():
+    """Default separator is comma (matching LoCoMo)."""
+    f1 = multi_answer_f1("coffee, tea", "coffee, tea")
     assert f1 == 1.0
 
-    f1 = multi_answer_f1("coffee", "coffee; tea")
+    f1 = multi_answer_f1("coffee", "coffee, tea")
     assert 0.0 < f1 < 1.0  # partial match
+
+
+def test_multi_answer_f1_semicolon():
+    """Can still use semicolon if explicitly passed."""
+    f1 = multi_answer_f1("coffee; tea", "coffee; tea", sep=";")
+    assert f1 == 1.0
+
+
+def test_adversarial_check():
+    assert adversarial_check("No information available about this topic") == 1.0
+    assert adversarial_check("This was not mentioned in any conversation") == 1.0
+    assert adversarial_check("The answer is 42") == 0.0
+    assert adversarial_check("") == 0.0
 
 
 def test_exact_match():
@@ -70,7 +99,7 @@ def test_recall_at_k():
 
 def test_reciprocal_rank():
     retrieved = ["Weather is sunny", "User likes dark roast coffee", "Random info"]
-    # "coffee" is relevant to index 1 (second position) → RR = 1/2
+    # "coffee" is relevant to index 1 (second position) -> RR = 1/2
     rr = reciprocal_rank(retrieved, "dark roast coffee")
     assert rr == pytest.approx(0.5)
     # No relevant results
@@ -108,6 +137,35 @@ def test_experiment_result_aggregation():
     assert result.overall_f1 == pytest.approx(2 / 3, abs=0.01)
     assert result.f1_by_category()["cat1"] == pytest.approx(0.5)
     assert result.f1_by_category()["cat2"] == pytest.approx(1.0)
+
+
+def test_experiment_result_judge_accuracy():
+    result = ExperimentResult(
+        experiment_name="test",
+        dataset="test",
+        retrieval_mode="none",
+        forgetting_policy="none",
+        qa_results=[
+            QAResult("q1", "a", "a", "cat1", 1.0, 1.0, 1.0, judge_score=1.0),
+            QAResult("q2", "b", "c", "cat1", 0.0, 0.0, 0.0, judge_score=0.0),
+            QAResult("q3", "d", "d", "cat2", 1.0, 1.0, 1.0, judge_score=None),
+        ],
+    )
+    # Only 2 judged results: 1.0 and 0.0 -> avg 0.5
+    assert result.overall_judge_accuracy == pytest.approx(0.5)
+
+
+def test_experiment_result_no_judge():
+    result = ExperimentResult(
+        experiment_name="test",
+        dataset="test",
+        retrieval_mode="none",
+        forgetting_policy="none",
+        qa_results=[
+            QAResult("q1", "a", "a", "cat1", 1.0, 1.0, 1.0),
+        ],
+    )
+    assert result.overall_judge_accuracy is None
 
 
 # ── Data loader tests ────────────────────────────────────────────

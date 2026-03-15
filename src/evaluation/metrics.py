@@ -1,14 +1,22 @@
 """Evaluation metrics for the benchmark suite.
 
-Implements token-level F1 (matching LoCoMo's approach), exact match,
-and memory-specific metrics.
+Implements token-level F1 (matching LoCoMo's Counter+stemmer approach),
+exact match, adversarial check, GPT-4o judge, and memory-specific metrics.
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 import string
+from collections import Counter
 from dataclasses import dataclass, field
+
+from nltk.stem import PorterStemmer
+
+_stemmer = PorterStemmer()
+logger = logging.getLogger(__name__)
 
 
 def normalize_answer(text: str) -> str:
@@ -24,26 +32,33 @@ def normalize_answer(text: str) -> str:
 
 
 def token_f1(prediction: str, ground_truth: str) -> float:
-    """Token-level F1 score between prediction and ground truth."""
-    pred_tokens = normalize_answer(prediction).split()
-    gt_tokens = normalize_answer(ground_truth).split()
+    """Token-level F1 using Counter intersection and Porter stemmer.
+
+    Matches the official LoCoMo evaluation (ext/locomo/task_eval/evaluation.py:126-138).
+    """
+    pred_tokens = [_stemmer.stem(w) for w in normalize_answer(prediction).split()]
+    gt_tokens = [_stemmer.stem(w) for w in normalize_answer(ground_truth).split()]
 
     if not gt_tokens and not pred_tokens:
         return 1.0
     if not gt_tokens or not pred_tokens:
         return 0.0
 
-    common = set(pred_tokens) & set(gt_tokens)
-    if not common:
+    common = Counter(pred_tokens) & Counter(gt_tokens)
+    num_same = sum(common.values())
+    if num_same == 0:
         return 0.0
 
-    precision = len(common) / len(pred_tokens)
-    recall = len(common) / len(gt_tokens)
-    return 2 * precision * recall / (precision + recall)
+    precision = num_same / len(pred_tokens)
+    recall = num_same / len(gt_tokens)
+    return (2 * precision * recall) / (precision + recall)
 
 
-def multi_answer_f1(prediction: str, ground_truth: str, sep: str = ";") -> float:
-    """F1 for multi-answer questions (answers separated by sep)."""
+def multi_answer_f1(prediction: str, ground_truth: str, sep: str = ",") -> float:
+    """F1 for multi-answer questions (answers separated by sep).
+
+    Default separator is comma, matching LoCoMo (ext/locomo/task_eval/evaluation.py:142).
+    """
     gt_answers = [a.strip() for a in ground_truth.split(sep) if a.strip()]
     pred_answers = [a.strip() for a in prediction.split(sep) if a.strip()]
 
@@ -57,6 +72,124 @@ def multi_answer_f1(prediction: str, ground_truth: str, sep: str = ";") -> float
         scores.append(best)
 
     return sum(scores) / len(scores)
+
+
+def adversarial_check(prediction: str) -> float:
+    """Check if prediction correctly identifies an adversarial (unanswerable) question.
+
+    Returns 1.0 if prediction contains refusal phrases, else 0.0.
+    Matches LoCoMo (ext/locomo/task_eval/evaluation.py:217-221).
+    """
+    lower = prediction.lower()
+    if "no information available" in lower or "not mentioned" in lower:
+        return 1.0
+    return 0.0
+
+
+# ── GPT-4o Judge (LongMemEval) ──────────────────────────────────
+
+_JUDGE_TEMPLATES: dict[str, str] = {
+    "single-session-user": (
+        "I will give you a question, a correct answer, and a response from a model. "
+        "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+        "If the response is equivalent to the correct answer or contains all the intermediate "
+        "steps to get the correct answer, you should also answer yes. If the response only "
+        "contains a subset of the information required by the answer, answer no. "
+        "\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}"
+        "\n\nIs the model response correct? Answer yes or no only."
+    ),
+    "single-session-assistant": (
+        "I will give you a question, a correct answer, and a response from a model. "
+        "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+        "If the response is equivalent to the correct answer or contains all the intermediate "
+        "steps to get the correct answer, you should also answer yes. If the response only "
+        "contains a subset of the information required by the answer, answer no. "
+        "\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}"
+        "\n\nIs the model response correct? Answer yes or no only."
+    ),
+    "multi-session": (
+        "I will give you a question, a correct answer, and a response from a model. "
+        "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+        "If the response is equivalent to the correct answer or contains all the intermediate "
+        "steps to get the correct answer, you should also answer yes. If the response only "
+        "contains a subset of the information required by the answer, answer no. "
+        "\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}"
+        "\n\nIs the model response correct? Answer yes or no only."
+    ),
+    "temporal-reasoning": (
+        "I will give you a question, a correct answer, and a response from a model. "
+        "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+        "If the response is equivalent to the correct answer or contains all the intermediate "
+        "steps to get the correct answer, you should also answer yes. If the response only "
+        "contains a subset of the information required by the answer, answer no. "
+        "In addition, do not penalize off-by-one errors for the number of days. "
+        "If the question asks for the number of days/weeks/months, etc., and the model makes "
+        "off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's "
+        "response is still correct. "
+        "\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}"
+        "\n\nIs the model response correct? Answer yes or no only."
+    ),
+    "knowledge-update": (
+        "I will give you a question, a correct answer, and a response from a model. "
+        "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+        "If the response contains some previous information along with an updated answer, "
+        "the response should be considered as correct as long as the updated answer is the "
+        "required answer."
+        "\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}"
+        "\n\nIs the model response correct? Answer yes or no only."
+    ),
+    "single-session-preference": (
+        "I will give you a question, a rubric for desired personalized response, and a "
+        "response from a model. Please answer yes if the response satisfies the desired "
+        "response. Otherwise, answer no. The model does not need to reflect all the points "
+        "in the rubric. The response is correct as long as it recalls and utilizes the user's "
+        "personal information correctly."
+        "\n\nQuestion: {question}\n\nRubric: {answer}\n\nModel Response: {response}"
+        "\n\nIs the model response correct? Answer yes or no only."
+    ),
+    "abstention": (
+        "I will give you an unanswerable question, an explanation, and a response from a "
+        "model. Please answer yes if the model correctly identifies the question as "
+        "unanswerable. The model could say that the information is incomplete, or some other "
+        "information is given but the asked information is not."
+        "\n\nQuestion: {question}\n\nExplanation: {answer}\n\nModel Response: {response}"
+        "\n\nDoes the model correctly identify the question as unanswerable? Answer yes or no only."
+    ),
+}
+
+
+def gpt4o_judge(
+    question: str,
+    answer: str,
+    prediction: str,
+    question_type: str,
+    is_abstention: bool = False,
+) -> float | None:
+    """Use GPT-4o to judge answer correctness (LongMemEval protocol).
+
+    Replicates exact prompt templates from ext/LongMemEval/src/evaluation/evaluate_qa.py:24-42.
+    Returns 1.0 if correct, 0.0 if incorrect, None if OPENAI_API_KEY not set.
+    """
+    if not os.environ.get("OPENAI_API_KEY"):
+        return None
+
+    template_key = "abstention" if is_abstention else question_type
+    template = _JUDGE_TEMPLATES.get(template_key)
+    if template is None:
+        # Fall back to single-session-user for unknown types
+        template = _JUDGE_TEMPLATES["single-session-user"]
+
+    prompt = template.format(question=question, answer=answer, response=prediction)
+
+    try:
+        from langchain_openai import ChatOpenAI
+
+        judge_llm = ChatOpenAI(model="gpt-4o", temperature=0, max_tokens=10)
+        result = judge_llm.invoke([{"role": "user", "content": prompt}])
+        return 1.0 if "yes" in result.content.strip().lower() else 0.0
+    except Exception as e:
+        logger.warning("GPT-4o judge failed: %s", e)
+        return None
 
 
 def exact_match(prediction: str, ground_truth: str) -> float:
@@ -122,6 +255,7 @@ class QAResult:
     task_success: float = 0.0
     latency_seconds: float = 0.0
     num_retrieved: int = 0
+    judge_score: float | None = None
 
 
 @dataclass
@@ -213,6 +347,13 @@ class ExperimentResult:
         return sum(r.latency_seconds for r in self.qa_results) / len(self.qa_results)
 
     @property
+    def overall_judge_accuracy(self) -> float | None:
+        judged = [r for r in self.qa_results if r.judge_score is not None]
+        if not judged:
+            return None
+        return sum(r.judge_score for r in judged) / len(judged)
+
+    @property
     def multi_hop_f1(self) -> float:
         mh = [r for r in self.qa_results if r.category == "multi_hop"]
         if not mh:
@@ -238,6 +379,10 @@ class ExperimentResult:
             "overall_mrr": round(self.overall_mrr, 4),
             "overall_task_success_rate": round(self.overall_task_success_rate, 4),
             "multi_hop_f1": round(self.multi_hop_f1, 4),
+            "overall_judge_accuracy": (
+                round(self.overall_judge_accuracy, 4)
+                if self.overall_judge_accuracy is not None else None
+            ),
             "avg_latency_seconds": round(self.avg_latency, 4),
             "f1_by_category": {k: round(v, 4) for k, v in self.f1_by_category().items()},
             "num_questions": len(self.qa_results),
@@ -265,6 +410,7 @@ class ExperimentResult:
                     "task_success": round(r.task_success, 4),
                     "latency_seconds": round(r.latency_seconds, 4),
                     "num_retrieved": r.num_retrieved,
+                    "judge_score": r.judge_score,
                     "sample_id": r.sample_id,
                 }
                 for r in self.qa_results

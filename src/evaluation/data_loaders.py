@@ -130,7 +130,7 @@ def load_locomo(
 # ── LongMemEval ──────────────────────────────────────────────────
 
 def load_longmemeval(
-    path: str = "ext/LongMemEval/data/longmemeval_oracle.json",
+    path: str = "data/longmemeval_oracle.json",
     max_samples: int | None = None,
     question_types: list[str] | None = None,
 ) -> list[BenchmarkSample]:
