@@ -1,8 +1,8 @@
 """Run LoCoMo QA evaluation using graph-based memory.
 
-For each conversation:
+Pipeline (per conversation):
   1. Build a MemoryGraph (session-by-session extraction + optional forgetting).
-  2. For each QA pair: retrieve relevant nodes → generate answer → compute F1.
+  2. For each QA pair: retrieve relevant nodes -> generate answer -> compute F1.
   3. Aggregate scores by category.
 """
 from __future__ import annotations
@@ -22,23 +22,23 @@ from experiments.config import DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_TOP_K, R
 from experiments.data_loaders import LoCoMoSample, load_locomo
 from experiments.graph_builder import build_locomo_graph
 from experiments.graph_retriever import retrieve_and_format
-from experiments.metrics import eval_locomo_qa, locomo_context_recall
+from experiments.metrics import eval_locomo_qa
 
 _QA_SYSTEM_PROMPT = """\
 You are answering questions about a long conversation between two people.
-Use the provided memory context to answer. Write a short phrase answer.
-Answer with exact words from the context whenever possible.
-If the information is not available, say "Not mentioned in conversation".\
+Use the provided memory context to answer. Be concise — write a short phrase.
+If the context contains relevant information, use it to answer even if the \
+exact phrasing differs. Infer the answer from the available facts.
+Only say "Not mentioned in conversation" if absolutely nothing in the context \
+relates to the question.\
 """
 
 
 def _answer_question(
     question: str,
     context: str,
-    model: str = DEFAULT_MODEL,
-    provider: str = DEFAULT_PROVIDER,
+    llm,
 ) -> str:
-    llm = build_llm(model=model, provider=provider)
     messages = [
         SystemMessage(content=_QA_SYSTEM_PROMPT),
         HumanMessage(content=f"Memory context:\n{context}\n\nQuestion: {question}\nShort answer:"),
@@ -81,25 +81,31 @@ def evaluate_locomo(
     cat_scores: Dict[int, List[float]] = defaultdict(list)
     per_sample_results: List[Dict] = []
 
+    # Single LLM instance for all QA calls
+    qa_llm = build_llm(model=model, provider=provider)
+
     for si, sample in enumerate(samples):
         print(f"\n[LoCoMo {si+1}/{len(samples)}] {sample.sample_id}")
 
-        # Step 1: build graph
+        # ---- Step 1: Build graph from all sessions FIRST ----
         graph = build_locomo_graph(
             sample, forget_preset=forget_preset,
             model=model, provider=provider,
         )
-        print(f"  Graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
+        print(f"  Graph built: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
 
-        # Step 2: evaluate QA
+        # ---- Step 2: Retrieve + Predict for each QA ----
         qas = sample.qas
         if max_qas_per_sample:
             qas = qas[:max_qas_per_sample]
 
         sample_results: List[Dict] = []
         for qi, qa in enumerate(qas):
+            # Retrieve from pre-built graph
             context = retrieve_and_format(qa.question, graph, top_k=top_k)
-            prediction = _answer_question(qa.question, context, model=model, provider=provider)
+            # LLM predicts answer using retrieved context
+            prediction = _answer_question(qa.question, context, llm=qa_llm)
+            # Measure metric
             f1 = eval_locomo_qa(prediction, qa.answer, qa.category)
 
             all_scores.append(f1)

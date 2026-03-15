@@ -5,7 +5,7 @@ import time
 from enum import Enum
 from typing import Dict, List, Optional, Set
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from memory.schemas import EdgeType, MemoryEdge, MemoryNode, NodeType
 from memory.graph_store import MemoryGraph
@@ -110,7 +110,7 @@ class ForgetPolicy(BaseModel):
     )
 
     # -- internal bookkeeping (persisted across calls) --
-    _meta: Dict[str, NodeMeta] = {}
+    _meta: Dict[str, NodeMeta] = PrivateAttr(default_factory=dict)
 
     # -- public helpers for metadata management --
 
@@ -124,6 +124,16 @@ class ForgetPolicy(BaseModel):
     def track_many(self, nodes: List[MemoryNode]) -> None:
         for n in nodes:
             self.track(n)
+
+    def register_new(self, node: MemoryNode) -> None:
+        """Register a node for the first time without bumping access count.
+
+        Use this when adding newly extracted nodes.  ``track()`` should be
+        reserved for retrieval-time access so that access_count reflects
+        actual usage, not extraction count.
+        """
+        if node.id not in self._meta:
+            self._meta[node.id] = NodeMeta()
 
     def pin(self, node_id: str) -> None:
         """Pin a node so it is never forgotten."""

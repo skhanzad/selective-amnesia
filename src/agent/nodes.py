@@ -68,8 +68,13 @@ who is building a memory graph agent". Instead of "Paris", write \
 "Paris is the capital of France, mentioned when discussing European cities".
 - Always explain WHO, WHAT, or WHY in the node content so the node is \
 meaningful on its own without the original conversation.
+- ALWAYS include dates, times, and temporal context when mentioned. \
+For example, instead of "Alice went hiking", write "Alice went hiking \
+on May 7, 2023". For events, include WHEN they happened or will happen.
 - Extract relationships (edges) between nodes. A good memory graph has \
 both detailed nodes AND edges connecting them.
+- Use temporal_before edges to capture the ORDER of events when multiple \
+events are mentioned. This is critical for answering "when" questions.
 - Reference edge endpoints by their 0-based index in the nodes list. \
 For example, if node 0 is about "Alice" and node 1 is about "Bob", \
 an edge from Alice to Bob has source_index=0, target_index=1.

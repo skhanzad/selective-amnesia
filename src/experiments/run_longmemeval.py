@@ -1,6 +1,6 @@
 """Run LongMemEval QA evaluation using graph-based memory.
 
-For each instance:
+Pipeline (per instance):
   1. Build a MemoryGraph from the haystack sessions.
   2. Retrieve relevant nodes for the question.
   3. Generate an answer using LLM + retrieved context.
@@ -40,10 +40,12 @@ def _answer_question(
     question: str,
     context: str,
     question_date: str = "",
-    model: str = DEFAULT_MODEL,
-    provider: str = DEFAULT_PROVIDER,
+    llm=None,
+    model: str = "",
+    provider: str = "",
 ) -> str:
-    llm = build_llm(model=model, provider=provider)
+    if llm is None:
+        llm = build_llm(model=model, provider=provider)
     date_line = f"\nCurrent date: {question_date}" if question_date else ""
     messages = [
         SystemMessage(content=_QA_SYSTEM_PROMPT),
@@ -91,6 +93,9 @@ def evaluate_longmemeval(
     all_scores: List[float] = []
     details: List[Dict] = []
 
+    # Single LLM instance for all QA calls
+    qa_llm = build_llm(model=model, provider=provider)
+
     for i, inst in enumerate(instances):
         is_abstention = "_abs" in inst.question_id
 
@@ -98,21 +103,23 @@ def evaluate_longmemeval(
             running = sum(all_scores) / len(all_scores) if all_scores else 0
             print(f"  [{i+1}/{len(instances)}] running acc={running:.3f}")
 
-        # Step 1: build graph
+        # ---- Step 1: Build graph from all sessions FIRST ----
         graph = build_longmemeval_graph(
             inst, forget_preset=forget_preset,
             model=model, provider=provider,
         )
 
-        # Step 2: retrieve + answer
+        # ---- Step 2: Retrieve from pre-built graph ----
         context = retrieve_and_format(inst.question, graph, top_k=top_k)
+
+        # ---- Step 3: LLM predicts answer ----
         prediction = _answer_question(
             inst.question, context,
             question_date=inst.question_date,
-            model=model, provider=provider,
+            llm=qa_llm,
         )
 
-        # Step 3: evaluate
+        # ---- Step 4: Measure metric ----
         if is_abstention:
             low = prediction.lower()
             correct = 1.0 if ("don't have" in low or "not available" in low or "no information" in low or "i don't" in low) else 0.0
